@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	gin "github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -169,5 +172,71 @@ func TestResolveTokenForAuth_Antigravity_SkipsRefreshWhenTokenValid(t *testing.T
 	}
 	if callCount != 0 {
 		t.Fatalf("expected no refresh calls, got %d", callCount)
+	}
+}
+
+func TestClientAuthMappingsCRUD(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/config.yaml"
+	if err := os.WriteFile(configPath, []byte("api-keys: []\n"), 0o644); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+	h := NewHandler(&config.Config{}, configPath, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPut, "/", strings.NewReader(`{"value":[{"auth-index":" idx-a ","api-keys":[" key-1 ","key-2"]},{"auth-index":"idx-b","api-keys":["key-3"]}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.PutClientAuthMappings(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(h.cfg.ClientAuthMappings) != 2 {
+		t.Fatalf("expected 2 mappings after PUT, got %d", len(h.cfg.ClientAuthMappings))
+	}
+	if h.cfg.ClientAuthMappings[0].AuthIndex != "idx-a" {
+		t.Fatalf("expected trimmed auth-index idx-a, got %q", h.cfg.ClientAuthMappings[0].AuthIndex)
+	}
+
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"value":[{"auth-index":"idx-a","api-keys":["key-1","key-9"]}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.PatchClientAuthMappings(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(h.cfg.ClientAuthMappings) != 2 {
+		t.Fatalf("expected 2 mappings after PATCH, got %d", len(h.cfg.ClientAuthMappings))
+	}
+	if got := strings.Join(h.cfg.ClientAuthMappings[0].APIKeys, ","); got != "key-1,key-9" {
+		t.Fatalf("unexpected idx-a keys after PATCH: %s", got)
+	}
+
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/", strings.NewReader(`{"value":["idx-b"]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.DeleteClientAuthMappings(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(h.cfg.ClientAuthMappings) != 1 {
+		t.Fatalf("expected 1 mapping after DELETE, got %d", len(h.cfg.ClientAuthMappings))
+	}
+	if h.cfg.ClientAuthMappings[0].AuthIndex != "idx-a" {
+		t.Fatalf("expected remaining auth-index idx-a, got %q", h.cfg.ClientAuthMappings[0].AuthIndex)
+	}
+
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/", strings.NewReader(`{"value":[]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.DeleteClientAuthMappings(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE clear status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(h.cfg.ClientAuthMappings) != 0 {
+		t.Fatalf("expected mappings cleared, got %d", len(h.cfg.ClientAuthMappings))
 	}
 }

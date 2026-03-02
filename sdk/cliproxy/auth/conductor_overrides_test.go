@@ -128,7 +128,7 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 }
 
 func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) {
-	request := cliproxyexecutor.Request{Model: "test-model"}
+	request := cliproxyexecutor.Request{}
 	testCases := []struct {
 		name   string
 		invoke func(*Manager) error
@@ -175,6 +175,89 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 				t.Fatalf("expected 2 calls with max-retry-credentials=0, got %d", calls)
 			}
 		})
+	}
+}
+
+type pinnedAuthCaptureExecutor struct {
+	id string
+
+	mu         sync.Mutex
+	calls      int
+	lastAuthID string
+}
+
+func (e *pinnedAuthCaptureExecutor) Identifier() string {
+	return e.id
+}
+
+func (e *pinnedAuthCaptureExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.captureAuth(auth)
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *pinnedAuthCaptureExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	chunks := make(chan cliproxyexecutor.StreamChunk)
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *pinnedAuthCaptureExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *pinnedAuthCaptureExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.captureAuth(auth)
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *pinnedAuthCaptureExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *pinnedAuthCaptureExecutor) captureAuth(auth *Auth) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+	if auth != nil {
+		e.lastAuthID = auth.ID
+	}
+}
+
+func (e *pinnedAuthCaptureExecutor) LastAuthID() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastAuthID
+}
+
+func (e *pinnedAuthCaptureExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func TestManager_Execute_RespectsPinnedAuthMetadata(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &pinnedAuthCaptureExecutor{id: "claude"}
+	m.RegisterExecutor(executor)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: "auth-1", Provider: "claude"}); errRegister != nil {
+		t.Fatalf("register auth-1: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: "auth-2", Provider: "claude"}); errRegister != nil {
+		t.Fatalf("register auth-2: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: "auth-2"}}
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, request, opts)
+	if errExecute != nil {
+		t.Fatalf("execute with pinned auth: %v", errExecute)
+	}
+	if got := executor.Calls(); got != 1 {
+		t.Fatalf("expected exactly 1 executor call, got %d", got)
+	}
+	if got := executor.LastAuthID(); got != "auth-2" {
+		t.Fatalf("expected pinned auth-id auth-2, got %q", got)
 	}
 }
 

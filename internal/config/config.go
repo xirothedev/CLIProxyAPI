@@ -631,6 +631,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
+	// Normalize client-auth mappings used for dedicated auth pinning.
+	cfg.SanitizeClientAuthMappings()
+
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
@@ -872,6 +875,91 @@ func NormalizeHeaders(headers map[string]string) map[string]string {
 		return nil
 	}
 	return clean
+}
+
+// SanitizeClientAuthMappings trims and deduplicates client-auth mappings.
+// It removes entries with empty auth-index values and enforces unique client API keys across mappings.
+func (cfg *Config) SanitizeClientAuthMappings() {
+	if cfg == nil {
+		return
+	}
+	cfg.ClientAuthMappings = NormalizeClientAuthMappings(cfg.ClientAuthMappings)
+}
+
+// NormalizeClientAuthMappings trims and deduplicates client-auth mappings.
+// Empty auth-index entries are dropped. Duplicate auth-index entries are merged.
+// Duplicate client API keys across different auth-index mappings are removed from later entries.
+func NormalizeClientAuthMappings(entries []ClientAuthMappingEntry) []ClientAuthMappingEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	out := make([]ClientAuthMappingEntry, 0, len(entries))
+	authIndexToPos := make(map[string]int, len(entries))
+	clientKeyToAuthIndex := make(map[string]string)
+
+	for _, entry := range entries {
+		authIndex := strings.TrimSpace(entry.AuthIndex)
+		if authIndex == "" {
+			continue
+		}
+		keys := normalizeAPIKeysPreserveOrder(entry.APIKeys)
+		if len(keys) == 0 {
+			continue
+		}
+
+		pos, exists := authIndexToPos[authIndex]
+		if !exists {
+			out = append(out, ClientAuthMappingEntry{AuthIndex: authIndex})
+			pos = len(out) - 1
+			authIndexToPos[authIndex] = pos
+		}
+
+		merged := out[pos].APIKeys
+		for _, key := range keys {
+			if _, mapped := clientKeyToAuthIndex[key]; mapped {
+				continue
+			}
+			clientKeyToAuthIndex[key] = authIndex
+			merged = append(merged, key)
+		}
+		out[pos].APIKeys = merged
+	}
+
+	clean := make([]ClientAuthMappingEntry, 0, len(out))
+	for _, entry := range out {
+		if len(entry.APIKeys) == 0 {
+			continue
+		}
+		clean = append(clean, entry)
+	}
+	if len(clean) == 0 {
+		return nil
+	}
+	return clean
+}
+
+func normalizeAPIKeysPreserveOrder(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // NormalizeExcludedModels trims, lowercases, and deduplicates model exclusion patterns.

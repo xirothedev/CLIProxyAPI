@@ -26,10 +26,10 @@ auths/*
 !auths/.gitkeep
 
 # Documentation
-docs/*
-AGENTS.md
-CLAUDE.md
-GEMINI.md
+# docs/*
+# AGENTS.md
+# CLAUDE.md
+# GEMINI.md
 
 # Tooling metadata
 .vscode/*
@@ -49,3 +49,6 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# Playwright
+.playwright-mcp

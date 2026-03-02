@@ -1322,6 +1322,110 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 	h.persist(c)
 }
 
+// GetClientAuthMappings returns the client API key to auth-index mapping.
+func (h *Handler) GetClientAuthMappings(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(200, gin.H{"client-auth-mappings": []config.ClientAuthMappingEntry{}})
+		return
+	}
+	entries := config.NormalizeClientAuthMappings(h.cfg.ClientAuthMappings)
+	if len(entries) == 0 {
+		entries = []config.ClientAuthMappingEntry{}
+	}
+	c.JSON(200, gin.H{"client-auth-mappings": entries})
+}
+
+// PutClientAuthMappings replaces all client auth mappings.
+func (h *Handler) PutClientAuthMappings(c *gin.Context) {
+	var body struct {
+		Value []config.ClientAuthMappingEntry `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	h.cfg.ClientAuthMappings = config.NormalizeClientAuthMappings(body.Value)
+	h.persist(c)
+}
+
+// PatchClientAuthMappings adds or updates client auth mapping entries.
+// Matching is done by auth-index.
+func (h *Handler) PatchClientAuthMappings(c *gin.Context) {
+	var body struct {
+		Value []config.ClientAuthMappingEntry `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	existing := make([]config.ClientAuthMappingEntry, 0, len(h.cfg.ClientAuthMappings)+len(body.Value))
+	existing = append(existing, h.cfg.ClientAuthMappings...)
+	for _, newEntry := range body.Value {
+		authIndex := strings.TrimSpace(newEntry.AuthIndex)
+		if authIndex == "" {
+			continue
+		}
+		replaced := false
+		for i := range existing {
+			if strings.TrimSpace(existing[i].AuthIndex) == authIndex {
+				existing[i] = config.ClientAuthMappingEntry{AuthIndex: authIndex, APIKeys: append([]string(nil), newEntry.APIKeys...)}
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			existing = append(existing, config.ClientAuthMappingEntry{AuthIndex: authIndex, APIKeys: append([]string(nil), newEntry.APIKeys...)})
+		}
+	}
+	h.cfg.ClientAuthMappings = config.NormalizeClientAuthMappings(existing)
+	h.persist(c)
+}
+
+// DeleteClientAuthMappings removes mapping entries by auth-index.
+// Body must be JSON: {"value": ["<auth-index>", ...]}.
+// If "value" is an empty array, clears all entries.
+func (h *Handler) DeleteClientAuthMappings(c *gin.Context) {
+	var body struct {
+		Value []string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.Value == nil {
+		c.JSON(400, gin.H{"error": "missing value"})
+		return
+	}
+	if len(body.Value) == 0 {
+		h.cfg.ClientAuthMappings = nil
+		h.persist(c)
+		return
+	}
+
+	toRemove := make(map[string]struct{}, len(body.Value))
+	for _, value := range body.Value {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			toRemove[trimmed] = struct{}{}
+		}
+	}
+	if len(toRemove) == 0 {
+		c.JSON(400, gin.H{"error": "empty value"})
+		return
+	}
+
+	filtered := make([]config.ClientAuthMappingEntry, 0, len(h.cfg.ClientAuthMappings))
+	for _, entry := range h.cfg.ClientAuthMappings {
+		if _, ok := toRemove[strings.TrimSpace(entry.AuthIndex)]; ok {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	h.cfg.ClientAuthMappings = config.NormalizeClientAuthMappings(filtered)
+	h.persist(c)
+}
+
 // normalizeAmpUpstreamAPIKeyEntries normalizes a list of upstream API key entries.
 func normalizeAmpUpstreamAPIKeyEntries(entries []config.AmpUpstreamAPIKeyEntry) []config.AmpUpstreamAPIKeyEntry {
 	if len(entries) == 0 {

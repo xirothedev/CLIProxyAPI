@@ -139,6 +139,9 @@ type Server struct {
 	// accessManager handles request authentication providers.
 	accessManager *sdkaccess.Manager
 
+	// authManager handles runtime credential selection and execution state.
+	authManager *auth.Manager
+
 	// requestLogger is the request logger instance for dynamic configuration updates.
 	requestLogger logging.RequestLogger
 	loggerToggle  func(bool)
@@ -245,6 +248,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
 		cfg:                 cfg,
 		accessManager:       accessManager,
+		authManager:         authManager,
 		requestLogger:       requestLogger,
 		loggerToggle:        toggle,
 		configFilePath:      configFilePath,
@@ -326,7 +330,7 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(AuthMiddleware(s.accessManager), s.clientAuthMappingMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -340,7 +344,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(AuthMiddleware(s.accessManager), s.clientAuthMappingMiddleware())
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -533,6 +537,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+
+		mgmt.GET("/client-auth-mappings", s.mgmt.GetClientAuthMappings)
+		mgmt.PUT("/client-auth-mappings", s.mgmt.PutClientAuthMappings)
+		mgmt.PATCH("/client-auth-mappings", s.mgmt.PatchClientAuthMappings)
+		mgmt.DELETE("/client-auth-mappings", s.mgmt.DeleteClientAuthMappings)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -1051,4 +1060,96 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+func (s *Server) clientAuthMappingMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || s.cfg == nil {
+			c.Next()
+			return
+		}
+		if len(s.cfg.ClientAuthMappings) == 0 {
+			c.Next()
+			return
+		}
+
+		rawAPIKey, ok := c.Get("apiKey")
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing authenticated client api key"})
+			return
+		}
+		apiKey, _ := rawAPIKey.(string)
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing authenticated client api key"})
+			return
+		}
+
+		authIndex := mappedAuthIndexForClientKey(s.cfg.ClientAuthMappings, apiKey)
+		if authIndex == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "client api key is not mapped to a dedicated auth"})
+			return
+		}
+
+		authID, found, disabled := s.resolveAuthIDByIndex(authIndex)
+		switch {
+		case !found:
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "mapped auth-index not found"})
+			return
+		case disabled:
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "mapped auth-index is disabled"})
+			return
+		}
+
+		if c.Request != nil {
+			ctx := handlers.WithPinnedAuthID(c.Request.Context(), authID)
+			c.Request = c.Request.WithContext(ctx)
+		}
+		c.Set("pinnedAuthID", authID)
+		c.Next()
+	}
+}
+
+func mappedAuthIndexForClientKey(entries []config.ClientAuthMappingEntry, apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" || len(entries) == 0 {
+		return ""
+	}
+	for i := range entries {
+		authIndex := strings.TrimSpace(entries[i].AuthIndex)
+		if authIndex == "" {
+			continue
+		}
+		for _, candidate := range entries[i].APIKeys {
+			if strings.TrimSpace(candidate) == apiKey {
+				return authIndex
+			}
+		}
+	}
+	return ""
+}
+
+func (s *Server) resolveAuthIDByIndex(authIndex string) (authID string, found bool, disabled bool) {
+	authIndex = strings.TrimSpace(authIndex)
+	if s == nil || s.authManager == nil || authIndex == "" {
+		return "", false, false
+	}
+	auths := s.authManager.List()
+	for i := range auths {
+		entry := auths[i]
+		if entry == nil {
+			continue
+		}
+		if entry.EnsureIndex() != authIndex {
+			continue
+		}
+		if strings.TrimSpace(entry.ID) == "" {
+			continue
+		}
+		if entry.Disabled || entry.Status == auth.StatusDisabled {
+			return "", true, true
+		}
+		return entry.ID, true, false
+	}
+	return "", false, false
 }

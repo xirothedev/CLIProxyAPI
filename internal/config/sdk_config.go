@@ -20,6 +20,10 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// ClientAuthMappings maps client API keys to dedicated auth indexes.
+	// Requests authenticated with unmapped keys can be rejected by server middleware.
+	ClientAuthMappings []ClientAuthMappingEntry `yaml:"client-auth-mappings,omitempty" json:"client-auth-mappings,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -30,6 +34,14 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// ClientAuthMappingEntry maps a set of client API keys to a dedicated auth index.
+type ClientAuthMappingEntry struct {
+	// AuthIndex is the stable auth target index (derived by auth.EnsureIndex()).
+	AuthIndex string `yaml:"auth-index" json:"auth-index"`
+	// APIKeys are client API keys that must use this dedicated auth target.
+	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
