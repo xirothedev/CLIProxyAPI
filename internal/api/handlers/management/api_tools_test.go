@@ -185,7 +185,7 @@ func TestClientAuthMappingsCRUD(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPut, "/", strings.NewReader(`{"value":[{"auth-index":" idx-a ","api-keys":[" key-1 ","key-2"]},{"auth-index":"idx-b","api-keys":["key-3"]}]}`))
+	c.Request = httptest.NewRequest(http.MethodPut, "/", strings.NewReader(`{"value":[{"auth-index":" idx-a ","api-keys":[" key-1 ","key-2"]},{"auth-index":"idx-b","api-keys":["key-2","key-3"]}]}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PutClientAuthMappings(c)
 	if w.Code != http.StatusOK {
@@ -197,20 +197,38 @@ func TestClientAuthMappingsCRUD(t *testing.T) {
 	if h.cfg.ClientAuthMappings[0].AuthIndex != "idx-a" {
 		t.Fatalf("expected trimmed auth-index idx-a, got %q", h.cfg.ClientAuthMappings[0].AuthIndex)
 	}
+	if got := strings.Join(h.cfg.ClientAuthMappings[0].APIKeys, ","); got != "key-1,key-2" {
+		t.Fatalf("unexpected idx-a keys after PUT: %s", got)
+	}
+	if h.cfg.ClientAuthMappings[1].AuthIndex != "idx-b" {
+		t.Fatalf("expected second auth-index idx-b, got %q", h.cfg.ClientAuthMappings[1].AuthIndex)
+	}
+	if got := strings.Join(h.cfg.ClientAuthMappings[1].APIKeys, ","); got != "key-2,key-3" {
+		t.Fatalf("expected duplicate key preserved across auth-index entries, got %s", got)
+	}
 
 	w = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"value":[{"auth-index":"idx-a","api-keys":["key-1","key-9"]}]}`))
+	c.Request = httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"value":[{"auth-index":"idx-a","api-keys":["key-1","key-9"]},{"auth-index":"idx-c","api-keys":["key-2"]}]}`))
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PatchClientAuthMappings(c)
 	if w.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d, body=%s", w.Code, w.Body.String())
 	}
-	if len(h.cfg.ClientAuthMappings) != 2 {
-		t.Fatalf("expected 2 mappings after PATCH, got %d", len(h.cfg.ClientAuthMappings))
+	if len(h.cfg.ClientAuthMappings) != 3 {
+		t.Fatalf("expected 3 mappings after PATCH, got %d", len(h.cfg.ClientAuthMappings))
 	}
 	if got := strings.Join(h.cfg.ClientAuthMappings[0].APIKeys, ","); got != "key-1,key-9" {
 		t.Fatalf("unexpected idx-a keys after PATCH: %s", got)
+	}
+	if got := strings.Join(h.cfg.ClientAuthMappings[1].APIKeys, ","); got != "key-2,key-3" {
+		t.Fatalf("expected idx-b to preserve duplicate key after PATCH, got %s", got)
+	}
+	if h.cfg.ClientAuthMappings[2].AuthIndex != "idx-c" {
+		t.Fatalf("expected appended auth-index idx-c, got %q", h.cfg.ClientAuthMappings[2].AuthIndex)
+	}
+	if got := strings.Join(h.cfg.ClientAuthMappings[2].APIKeys, ","); got != "key-2" {
+		t.Fatalf("expected idx-c to keep duplicated key across entries, got %s", got)
 	}
 
 	w = httptest.NewRecorder()
@@ -221,11 +239,14 @@ func TestClientAuthMappingsCRUD(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("DELETE status = %d, body=%s", w.Code, w.Body.String())
 	}
-	if len(h.cfg.ClientAuthMappings) != 1 {
-		t.Fatalf("expected 1 mapping after DELETE, got %d", len(h.cfg.ClientAuthMappings))
+	if len(h.cfg.ClientAuthMappings) != 2 {
+		t.Fatalf("expected 2 mappings after DELETE, got %d", len(h.cfg.ClientAuthMappings))
 	}
 	if h.cfg.ClientAuthMappings[0].AuthIndex != "idx-a" {
-		t.Fatalf("expected remaining auth-index idx-a, got %q", h.cfg.ClientAuthMappings[0].AuthIndex)
+		t.Fatalf("expected first remaining auth-index idx-a, got %q", h.cfg.ClientAuthMappings[0].AuthIndex)
+	}
+	if h.cfg.ClientAuthMappings[1].AuthIndex != "idx-c" {
+		t.Fatalf("expected second remaining auth-index idx-c, got %q", h.cfg.ClientAuthMappings[1].AuthIndex)
 	}
 
 	w = httptest.NewRecorder()

@@ -30,7 +30,7 @@ func TestNormalizeClientAuthMappings_DeduplicatesAndTrims(t *testing.T) {
 	entries := NormalizeClientAuthMappings([]ClientAuthMappingEntry{
 		{AuthIndex: " idx-a ", APIKeys: []string{" key-1 ", "key-2", "key-1"}},
 		{AuthIndex: "idx-b", APIKeys: []string{"key-2", "key-3"}},
-		{AuthIndex: "idx-a", APIKeys: []string{"key-4"}},
+		{AuthIndex: "idx-a", APIKeys: []string{"key-4", "key-2"}},
 		{AuthIndex: " ", APIKeys: []string{"key-x"}},
 	})
 
@@ -49,8 +49,11 @@ func TestNormalizeClientAuthMappings_DeduplicatesAndTrims(t *testing.T) {
 	if entries[1].AuthIndex != "idx-b" {
 		t.Fatalf("expected second auth-index idx-b, got %q", entries[1].AuthIndex)
 	}
-	if got := len(entries[1].APIKeys); got != 1 || entries[1].APIKeys[0] != "key-3" {
-		t.Fatalf("expected idx-b keys [key-3], got %#v", entries[1].APIKeys)
+	if got := len(entries[1].APIKeys); got != 2 {
+		t.Fatalf("expected idx-b to contain 2 keys, got %d", got)
+	}
+	if entries[1].APIKeys[0] != "key-2" || entries[1].APIKeys[1] != "key-3" {
+		t.Fatalf("expected idx-b keys [key-2 key-3], got %#v", entries[1].APIKeys)
 	}
 }
 

@@ -20,7 +20,8 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
-	// ClientAuthMappings maps client API keys to dedicated auth indexes.
+	// ClientAuthMappings maps client API keys to one or more dedicated auth indexes.
+	// The same client API key may appear under multiple auth-index entries, allowing runtime round-robin selection across active targets.
 	// Requests authenticated with unmapped keys can be rejected by server middleware.
 	ClientAuthMappings []ClientAuthMappingEntry `yaml:"client-auth-mappings,omitempty" json:"client-auth-mappings,omitempty"`
 
@@ -37,10 +38,12 @@ type SDKConfig struct {
 }
 
 // ClientAuthMappingEntry maps a set of client API keys to a dedicated auth index.
+// A client key can be repeated across different entries to define multiple candidate auth targets.
 type ClientAuthMappingEntry struct {
 	// AuthIndex is the stable auth target index (derived by auth.EnsureIndex()).
 	AuthIndex string `yaml:"auth-index" json:"auth-index"`
-	// APIKeys are client API keys that must use this dedicated auth target.
+	// APIKeys are client API keys associated with this auth target.
+	// Keys are normalized/deduplicated within the same auth-index entry, but may appear in other entries.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 }
 

@@ -37,16 +37,20 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
-# Map each client API key to a dedicated auth file/account using auth_index.
+# Map client API keys to dedicated auth files/accounts using auth-index.
 # auth-index values are exposed by GET /v0/management/auth-files as "auth_index".
+# The same client API key may appear under multiple auth-index entries.
+# Runtime selection uses round-robin across active mapped targets for that key.
+# Missing or disabled mapped targets are skipped before the request is rejected.
 # Requests with authenticated client keys not mapped here are rejected on /v1 and /v1beta.
 # client-auth-mappings:
 #   - auth-index: "2f4a8b7c9d10e11f"
 #     api-keys:
 #       - "your-api-key-1"
+#       - "your-api-key-2"
 #   - auth-index: "ab12cd34ef56gh78"
 #     api-keys:
-#       - "your-api-key-2"
+#       - "your-api-key-1"
 #       - "your-api-key-3"
 
 # Enable debug logging

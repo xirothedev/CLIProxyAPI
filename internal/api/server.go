@@ -179,6 +179,9 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	// clientAuthMappingRoundRobin stores per-client-key round-robin state for mapped dedicated auth selection.
+	clientAuthMappingRoundRobin sync.Map
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -1085,36 +1088,49 @@ func (s *Server) clientAuthMappingMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		authIndex := mappedAuthIndexForClientKey(s.cfg.ClientAuthMappings, apiKey)
-		if authIndex == "" {
+		authIndexes := mappedAuthIndexesForClientKey(s.cfg.ClientAuthMappings, apiKey)
+		if len(authIndexes) == 0 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "client api key is not mapped to a dedicated auth"})
 			return
 		}
 
-		authID, found, disabled := s.resolveAuthIDByIndex(authIndex)
-		switch {
-		case !found:
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "mapped auth-index not found"})
-			return
-		case disabled:
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "mapped auth-index is disabled"})
+		start := s.nextClientAuthMappingOffset(apiKey, len(authIndexes))
+		sawDisabled := false
+		for i := 0; i < len(authIndexes); i++ {
+			authIndex := authIndexes[(start+i)%len(authIndexes)]
+			authID, found, disabled := s.resolveAuthIDByIndex(authIndex)
+			switch {
+			case disabled:
+				sawDisabled = true
+				continue
+			case !found:
+				continue
+			}
+
+			if c.Request != nil {
+				ctx := handlers.WithPinnedAuthID(c.Request.Context(), authID)
+				c.Request = c.Request.WithContext(ctx)
+			}
+			c.Set("pinnedAuthID", authID)
+			c.Next()
 			return
 		}
 
-		if c.Request != nil {
-			ctx := handlers.WithPinnedAuthID(c.Request.Context(), authID)
-			c.Request = c.Request.WithContext(ctx)
+		errorMessage := "mapped auth-index not found"
+		if sawDisabled {
+			errorMessage = "mapped auth-index is disabled"
 		}
-		c.Set("pinnedAuthID", authID)
-		c.Next()
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": errorMessage})
 	}
 }
 
-func mappedAuthIndexForClientKey(entries []config.ClientAuthMappingEntry, apiKey string) string {
+func mappedAuthIndexesForClientKey(entries []config.ClientAuthMappingEntry, apiKey string) []string {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" || len(entries) == 0 {
-		return ""
+		return nil
 	}
+
+	matches := make([]string, 0, len(entries))
 	for i := range entries {
 		authIndex := strings.TrimSpace(entries[i].AuthIndex)
 		if authIndex == "" {
@@ -1122,11 +1138,29 @@ func mappedAuthIndexForClientKey(entries []config.ClientAuthMappingEntry, apiKey
 		}
 		for _, candidate := range entries[i].APIKeys {
 			if strings.TrimSpace(candidate) == apiKey {
-				return authIndex
+				matches = append(matches, authIndex)
+				break
 			}
 		}
 	}
-	return ""
+	if len(matches) == 0 {
+		return nil
+	}
+	return matches
+}
+
+func (s *Server) nextClientAuthMappingOffset(apiKey string, candidateCount int) int {
+	apiKey = strings.TrimSpace(apiKey)
+	if s == nil || apiKey == "" || candidateCount <= 1 {
+		return 0
+	}
+
+	counterAny, _ := s.clientAuthMappingRoundRobin.LoadOrStore(apiKey, &atomic.Uint64{})
+	counter, ok := counterAny.(*atomic.Uint64)
+	if !ok || counter == nil {
+		return 0
+	}
+	return int(counter.Add(1)-1) % candidateCount
 }
 
 func (s *Server) resolveAuthIDByIndex(authIndex string) (authID string, found bool, disabled bool) {

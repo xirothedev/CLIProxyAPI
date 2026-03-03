@@ -210,6 +210,15 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	}
 }
 
+func runClientAuthMappingMiddleware(server *Server, apiKey string) (*httptest.ResponseRecorder, *gin.Context) {
+	rr := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rr)
+	ctx.Set("apiKey", apiKey)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	server.clientAuthMappingMiddleware()(ctx)
+	return rr, ctx
+}
+
 func TestClientAuthMappingMiddleware_RejectsUnmappedKey(t *testing.T) {
 	server := newTestServer(t)
 	server.cfg.ClientAuthMappings = []proxyconfig.ClientAuthMappingEntry{{
@@ -217,12 +226,7 @@ func TestClientAuthMappingMiddleware_RejectsUnmappedKey(t *testing.T) {
 		APIKeys:   []string{"another-key"},
 	}}
 
-	rr := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rr)
-	ctx.Set("apiKey", "test-key")
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-
-	server.clientAuthMappingMiddleware()(ctx)
+	rr, _ := runClientAuthMappingMiddleware(server, "test-key")
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("unexpected status: got %d want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
@@ -239,12 +243,7 @@ func TestClientAuthMappingMiddleware_RejectsMissingMappedAuth(t *testing.T) {
 		APIKeys:   []string{"test-key"},
 	}}
 
-	rr := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rr)
-	ctx.Set("apiKey", "test-key")
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-
-	server.clientAuthMappingMiddleware()(ctx)
+	rr, _ := runClientAuthMappingMiddleware(server, "test-key")
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("unexpected status: got %d want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
@@ -293,6 +292,147 @@ func TestClientAuthMappingMiddleware_PinsMappedAuth(t *testing.T) {
 	}
 }
 
+func TestClientAuthMappingMiddleware_RoundRobinAcrossMappedTargets(t *testing.T) {
+	server := newTestServer(t)
+	registeredA, err := server.authManager.Register(context.Background(), &auth.Auth{
+		ID:       "auth-1",
+		FileName: "auth-a.json",
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("register auth-a: %v", err)
+	}
+	registeredB, err := server.authManager.Register(context.Background(), &auth.Auth{
+		ID:       "auth-2",
+		FileName: "auth-b.json",
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("register auth-b: %v", err)
+	}
+	server.cfg.ClientAuthMappings = []proxyconfig.ClientAuthMappingEntry{
+		{AuthIndex: registeredA.EnsureIndex(), APIKeys: []string{"test-key"}},
+		{AuthIndex: registeredB.EnsureIndex(), APIKeys: []string{"test-key"}},
+	}
+
+	expected := []string{"auth-1", "auth-2", "auth-1", "auth-2"}
+	for i := range expected {
+		rr, ctx := runClientAuthMappingMiddleware(server, "test-key")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d unexpected status: got %d body=%s", i, rr.Code, rr.Body.String())
+		}
+		got, ok := ctx.Get("pinnedAuthID")
+		if !ok {
+			t.Fatalf("request %d expected pinnedAuthID", i)
+		}
+		if got != expected[i] {
+			t.Fatalf("request %d expected pinnedAuthID %q, got %#v", i, expected[i], got)
+		}
+	}
+}
+
+func TestClientAuthMappingMiddleware_SkipsUnavailableTarget(t *testing.T) {
+	t.Run("disabled first target", func(t *testing.T) {
+		server := newTestServer(t)
+		disabledAuth, err := server.authManager.Register(context.Background(), &auth.Auth{
+			ID:       "auth-disabled",
+			FileName: "auth-disabled.json",
+			Provider: "claude",
+			Disabled: true,
+		})
+		if err != nil {
+			t.Fatalf("register disabled auth: %v", err)
+		}
+		activeAuth, err := server.authManager.Register(context.Background(), &auth.Auth{
+			ID:       "auth-active",
+			FileName: "auth-active.json",
+			Provider: "claude",
+		})
+		if err != nil {
+			t.Fatalf("register active auth: %v", err)
+		}
+		server.cfg.ClientAuthMappings = []proxyconfig.ClientAuthMappingEntry{
+			{AuthIndex: disabledAuth.EnsureIndex(), APIKeys: []string{"test-key"}},
+			{AuthIndex: activeAuth.EnsureIndex(), APIKeys: []string{"test-key"}},
+		}
+
+		rr, ctx := runClientAuthMappingMiddleware(server, "test-key")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status: got %d body=%s", rr.Code, rr.Body.String())
+		}
+		if got, ok := ctx.Get("pinnedAuthID"); !ok || got != "auth-active" {
+			t.Fatalf("expected fallback to active auth, got %#v (ok=%v)", got, ok)
+		}
+	})
+
+	t.Run("missing first target", func(t *testing.T) {
+		server := newTestServer(t)
+		activeAuth, err := server.authManager.Register(context.Background(), &auth.Auth{
+			ID:       "auth-active",
+			FileName: "auth-active.json",
+			Provider: "claude",
+		})
+		if err != nil {
+			t.Fatalf("register active auth: %v", err)
+		}
+		server.cfg.ClientAuthMappings = []proxyconfig.ClientAuthMappingEntry{
+			{AuthIndex: "idx-missing", APIKeys: []string{"test-key"}},
+			{AuthIndex: activeAuth.EnsureIndex(), APIKeys: []string{"test-key"}},
+		}
+
+		rr, ctx := runClientAuthMappingMiddleware(server, "test-key")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status: got %d body=%s", rr.Code, rr.Body.String())
+		}
+		if got, ok := ctx.Get("pinnedAuthID"); !ok || got != "auth-active" {
+			t.Fatalf("expected fallback to active auth, got %#v (ok=%v)", got, ok)
+		}
+	})
+}
+
+func TestClientAuthMappingMiddleware_RejectsWhenAllMappedTargetsUnavailable(t *testing.T) {
+	t.Run("all missing returns not found", func(t *testing.T) {
+		server := newTestServer(t)
+		server.cfg.ClientAuthMappings = []proxyconfig.ClientAuthMappingEntry{
+			{AuthIndex: "idx-missing-a", APIKeys: []string{"test-key"}},
+			{AuthIndex: "idx-missing-b", APIKeys: []string{"test-key"}},
+		}
+
+		rr, _ := runClientAuthMappingMiddleware(server, "test-key")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("unexpected status: got %d want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "mapped auth-index not found") {
+			t.Fatalf("expected not found error, got %s", rr.Body.String())
+		}
+	})
+
+	t.Run("disabled has precedence over not found", func(t *testing.T) {
+		server := newTestServer(t)
+		disabledAuth, err := server.authManager.Register(context.Background(), &auth.Auth{
+			ID:       "auth-disabled",
+			FileName: "auth-disabled.json",
+			Provider: "claude",
+			Disabled: true,
+		})
+		if err != nil {
+			t.Fatalf("register disabled auth: %v", err)
+		}
+		server.cfg.ClientAuthMappings = []proxyconfig.ClientAuthMappingEntry{
+			{AuthIndex: "idx-missing", APIKeys: []string{"test-key"}},
+			{AuthIndex: disabledAuth.EnsureIndex(), APIKeys: []string{"test-key"}},
+		}
+
+		rr, _ := runClientAuthMappingMiddleware(server, "test-key")
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("unexpected status: got %d want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "mapped auth-index is disabled") {
+			t.Fatalf("expected disabled error precedence, got %s", rr.Body.String())
+		}
+	})
+}
+
 func TestClientAuthMappingMiddleware_RejectsDisabledAuth(t *testing.T) {
 	server := newTestServer(t)
 	registered, err := server.authManager.Register(context.Background(), &auth.Auth{
@@ -309,12 +449,7 @@ func TestClientAuthMappingMiddleware_RejectsDisabledAuth(t *testing.T) {
 		APIKeys:   []string{"test-key"},
 	}}
 
-	rr := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(rr)
-	ctx.Set("apiKey", "test-key")
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-
-	server.clientAuthMappingMiddleware()(ctx)
+	rr, _ := runClientAuthMappingMiddleware(server, "test-key")
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("unexpected status: got %d want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())

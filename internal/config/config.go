@@ -877,8 +877,9 @@ func NormalizeHeaders(headers map[string]string) map[string]string {
 	return clean
 }
 
-// SanitizeClientAuthMappings trims and deduplicates client-auth mappings.
-// It removes entries with empty auth-index values and enforces unique client API keys across mappings.
+// SanitizeClientAuthMappings trims and normalizes client-auth mappings.
+// It removes entries with empty auth-index values and keeps per-entry API key order.
+// The same client API key may appear under multiple auth-index entries.
 func (cfg *Config) SanitizeClientAuthMappings() {
 	if cfg == nil {
 		return
@@ -886,9 +887,9 @@ func (cfg *Config) SanitizeClientAuthMappings() {
 	cfg.ClientAuthMappings = NormalizeClientAuthMappings(cfg.ClientAuthMappings)
 }
 
-// NormalizeClientAuthMappings trims and deduplicates client-auth mappings.
-// Empty auth-index entries are dropped. Duplicate auth-index entries are merged.
-// Duplicate client API keys across different auth-index mappings are removed from later entries.
+// NormalizeClientAuthMappings trims and normalizes client-auth mappings.
+// Empty auth-index entries are dropped. Duplicate auth-index entries are merged in first-seen order.
+// API keys are deduplicated per auth-index while preserving order, and the same key may exist in multiple auth-index entries.
 func NormalizeClientAuthMappings(entries []ClientAuthMappingEntry) []ClientAuthMappingEntry {
 	if len(entries) == 0 {
 		return nil
@@ -896,7 +897,7 @@ func NormalizeClientAuthMappings(entries []ClientAuthMappingEntry) []ClientAuthM
 
 	out := make([]ClientAuthMappingEntry, 0, len(entries))
 	authIndexToPos := make(map[string]int, len(entries))
-	clientKeyToAuthIndex := make(map[string]string)
+	seenKeysByAuthIndex := make(map[string]map[string]struct{}, len(entries))
 
 	for _, entry := range entries {
 		authIndex := strings.TrimSpace(entry.AuthIndex)
@@ -913,14 +914,16 @@ func NormalizeClientAuthMappings(entries []ClientAuthMappingEntry) []ClientAuthM
 			out = append(out, ClientAuthMappingEntry{AuthIndex: authIndex})
 			pos = len(out) - 1
 			authIndexToPos[authIndex] = pos
+			seenKeysByAuthIndex[authIndex] = make(map[string]struct{}, len(keys))
 		}
 
+		seenKeys := seenKeysByAuthIndex[authIndex]
 		merged := out[pos].APIKeys
 		for _, key := range keys {
-			if _, mapped := clientKeyToAuthIndex[key]; mapped {
+			if _, seen := seenKeys[key]; seen {
 				continue
 			}
-			clientKeyToAuthIndex[key] = authIndex
+			seenKeys[key] = struct{}{}
 			merged = append(merged, key)
 		}
 		out[pos].APIKeys = merged
