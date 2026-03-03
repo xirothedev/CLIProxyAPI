@@ -331,23 +331,22 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		requestCtx = c.Request.Context()
 	}
 
-	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
-		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
-			parentCtx = logging.WithRequestID(parentCtx, requestID)
-		} else if requestID := logging.GetGinRequestID(c); requestID != "" {
-			parentCtx = logging.WithRequestID(parentCtx, requestID)
+	// Prefer request context as the execution base so middleware-attached values
+	// (e.g. pinned auth from client-auth-mappings) propagate into executors.
+	baseCtx := parentCtx
+	if requestCtx != nil {
+		baseCtx = requestCtx
+		if requestID := logging.GetRequestID(parentCtx); requestID != "" && logging.GetRequestID(baseCtx) == "" {
+			baseCtx = logging.WithRequestID(baseCtx, requestID)
 		}
 	}
-	newCtx, cancel := context.WithCancel(parentCtx)
-	if requestCtx != nil && requestCtx != parentCtx {
-		go func() {
-			select {
-			case <-requestCtx.Done():
-				cancel()
-			case <-newCtx.Done():
-			}
-		}()
+	if logging.GetRequestID(baseCtx) == "" {
+		if requestID := logging.GetGinRequestID(c); requestID != "" {
+			baseCtx = logging.WithRequestID(baseCtx, requestID)
+		}
 	}
+
+	newCtx, cancel := context.WithCancel(baseCtx)
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
